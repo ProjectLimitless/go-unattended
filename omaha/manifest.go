@@ -21,9 +21,9 @@ import (
 type Manifest struct {
 	XMLName xml.Name `xml:"manifest"`
 	// Version of the update
-	Version string `xml:"version,attr"`
+	Version string `xml:"version,attr,omitempty"`
 	// TraceID for the identification of this update
-	TraceID string `xml:"trace,attr"`
+	TraceID string `xml:"trace,attr,omitempty"`
 	// DownloadURL is the location of the downloadable package
 	DownloadURL URL `xml:"url"`
 	// Package contains the validation information for the package

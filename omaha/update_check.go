@@ -17,9 +17,9 @@ import "encoding/xml"
 
 // UpdateCheck holds information for checking for an update
 type UpdateCheck struct {
-	XML xml.Name `xml:"updatecheck"`
+	XML xml.Name `xml:"updatecheck,omitempty"`
 	// Status of the update check
-	Status string `xml:"status,attr"`
+	Status string `xml:"status,attr,omitempty"`
 	// Manifest of the update package
 	Manifest Manifest `xml:"manifest"`
 }

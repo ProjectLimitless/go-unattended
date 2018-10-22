@@ -19,9 +19,9 @@ import "encoding/xml"
 type Package struct {
 	XMLName xml.Name `xml:"package"`
 	// SHA256Hash of the download package
-	SHA256Hash string `xml:"hash,attr"`
+	SHA256Hash string `xml:"hash,attr,omitempty"`
 	// Name of the download package
-	Name string `xml:"name,attr"`
+	Name string `xml:"name,attr,omitempty"`
 	// SizeInBytes of the download package
-	SizeInBytes uint64 `xml:"size,attr"`
+	SizeInBytes uint64 `xml:"size,attr,omitempty"`
 }

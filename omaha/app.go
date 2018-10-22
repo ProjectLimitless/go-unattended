@@ -21,7 +21,7 @@ type App struct {
 	/// ID for the application
 	ID string `xml:"appid,attr"`
 	/// Status of the response
-	Status string `xml:"status,attr"`
+	Status string `xml:"status,attr,omitempty"`
 	/// Version of the application in symver format
 	Version string `xml:"version,attr"`
 	/// Channel of the update, stable, beta, etc.
@@ -31,7 +31,7 @@ type App struct {
 	/// Event being sent to the server
 	Event Event `xml:"event"`
 	/// Response for update events.
-	UpdateCheck UpdateCheck `xml:"updatecheck"`
+	UpdateCheck UpdateCheck `xml:"updatecheck,omitempty"`
 	/// Reason for failure if status is not Ok
 	Reason string `xml:"reason"`
 }

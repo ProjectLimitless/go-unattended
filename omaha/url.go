@@ -19,5 +19,5 @@ import "encoding/xml"
 type URL struct {
 	XMLName xml.Name `xml:"url"`
 	// Codebase contains the download location
-	Codebase string `xml:"codebase,attr"`
+	Codebase string `xml:"codebase,attr,omitempty"`
 }
