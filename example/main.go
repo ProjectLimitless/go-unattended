@@ -46,4 +46,10 @@ func main() {
 	} else {
 		fmt.Println("No update")
 	}
+
+	fmt.Println("Process all updates")
+	err = updater.ProcessUpdates()
+	if err != nil {
+		panic(err)
+	}
 }

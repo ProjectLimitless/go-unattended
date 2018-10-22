@@ -15,12 +15,18 @@ package unattended
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 
 	"github.com/ProjectLimitless/go-unattended/omaha"
+	"github.com/cavaliercoder/grab"
 )
 
 // Unattended implements the core functionality of the package. It takes
@@ -49,6 +55,98 @@ func (updater *Unattended) Run() error {
 	return nil
 }
 
+// ProcessUpdates checks, downloads and applies downloads if they are available
+func (updater *Unattended) ProcessUpdates() error {
+
+	omahaManifests, err := updater.getAvailableUpdates()
+	if err != nil {
+		return fmt.Errorf("Unable to get updates for all manifests: %s", err)
+	}
+	if len(omahaManifests) == 0 {
+		fmt.Println("No updates are available")
+		return nil
+	}
+
+	fmt.Printf("%d updates found.. download!\n", len(omahaManifests))
+
+	tempPath := filepath.Join(path.Dir(updater.config.Target.Path), "../tmp")
+
+	// Remove/clean the temp directory
+	err = os.RemoveAll(tempPath)
+	if err != nil {
+		fmt.Printf("Unable to remove temp download path at '%s': %s\n",
+			tempPath,
+			err)
+	}
+	// And recreate/create the temp directory
+	err = os.MkdirAll(tempPath, 0755)
+	if err != nil {
+		fmt.Printf("Unable to create temp download path at '%s': %s\n",
+			tempPath,
+			err)
+	}
+
+	fmt.Println("Downloading to", tempPath)
+
+	for _, omahaManifest := range omahaManifests {
+		downloadPath, err := updater.DownloadAndVerifyPackage(omahaManifest, tempPath)
+		if err != nil {
+			fmt.Printf("Unable to download package for '%s (%s)': %s\n",
+				omahaManifest.Package.Name,
+				omahaManifest.Version,
+				err)
+			continue
+		}
+		fmt.Printf("Downloaded package for '%s (%s)': %s\n",
+			omahaManifest.Package.Name,
+			omahaManifest.Version,
+			downloadPath)
+
+		// TODO: Ge latest version path
+		// TODO: Clone the path into new version
+		// TODO: Override files from package in new dir
+		// TODO: Restart app
+	}
+
+	return nil
+}
+
+// DownloadAndVerifyPackage downloads and verifies the package from the
+// given manifest and returns the downloaded location
+func (updater *Unattended) DownloadAndVerifyPackage(
+	manifest omaha.Manifest,
+	tempPath string) (string, error) {
+
+	fmt.Printf("Downloading package %s\n", manifest.Package.Name)
+
+	downloadPath := filepath.Join(tempPath, manifest.Package.Name)
+	response, err := grab.Get(downloadPath, manifest.DownloadURL.Codebase)
+	if err != nil {
+		return "", err
+	}
+
+	hasher := sha256.New()
+	downloadedFile, err := os.Open(response.Filename)
+	if err != nil {
+		return "", fmt.Errorf(
+			"Unable to access: %s",
+			manifest.Package.Name,
+			err)
+	}
+	defer downloadedFile.Close()
+	if _, err := io.Copy(hasher, downloadedFile); err != nil {
+		return "", fmt.Errorf(
+			"Could not be verified: %s",
+			err)
+	}
+
+	if manifest.Package.SHA256Hash != hex.EncodeToString(hasher.Sum(nil)) {
+		return "", fmt.Errorf("Failed verification")
+	}
+
+	return response.Filename, nil
+}
+
 // IsUpdateAvailable checks if an update is available and returns the available
 // package if true
 func (updater *Unattended) IsUpdateAvailable(
@@ -58,7 +156,7 @@ func (updater *Unattended) IsUpdateAvailable(
 	currentVersion := path.Base(currentVersionDirectory)
 
 	fmt.Printf(
-		"Checking updates for %s (v%s) at %s\n",
+		"Checking updates for %s (%s) at %s\n",
 		manifest.AppID,
 		currentVersion,
 		manifest.Endpoint)
@@ -123,7 +221,6 @@ func (updater *Unattended) IsUpdateAvailable(
 			omahaResponse.Application.Status,
 			omahaRequest.Application.Reason)
 	}
-
 	// No update is available
 	if omahaResponse.Application.UpdateCheck.Status == "noupdate" {
 		return false, omaha.Manifest{}, nil
@@ -134,5 +231,26 @@ func (updater *Unattended) IsUpdateAvailable(
 			omahaResponse.Application.UpdateCheck.Status)
 	}
 
-	return true, omaha.Manifest{}, nil
+	return true, omahaResponse.Application.UpdateCheck.Manifest, nil
+}
+
+// getAvailableUpdates checks for all packages that have updates available
+func (updater *Unattended) getAvailableUpdates() ([]omaha.Manifest, error) {
+	fmt.Println("Checking for updates on all manifests")
+
+	var omahaManifests []omaha.Manifest
+	for _, updateManifest := range updater.config.UpdateManifests {
+		hasUpdate, omahaManifest, err := updater.IsUpdateAvailable(updateManifest)
+		if err != nil {
+			return omahaManifests, err
+		}
+		if hasUpdate {
+			fmt.Printf("Update available for %s (%s)\n",
+				updateManifest.AppID,
+				omahaManifest.Version)
+			omahaManifests = append(omahaManifests, omahaManifest)
+		}
+	}
+
+	return omahaManifests, nil
 }

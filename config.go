@@ -11,6 +11,6 @@ type Config struct {
 	// UpdateCheckInterval defines the interval in which we
 	// should check for updates
 	UpdateCheckInterval time.Duration
-	// UpdateManifests is a collection of updates to check at the given interval
+	// UpdateManifests is the manifests for updating packages with the target
 	UpdateManifests []UpdateManifest
 }
