@@ -14,7 +14,9 @@
 package unattended
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
@@ -22,25 +24,55 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
+	"os/exec"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/ProjectLimitless/go-unattended/omaha"
 	"github.com/cavaliercoder/grab"
+	"github.com/otiai10/copy"
+	"github.com/sirupsen/logrus"
 )
 
 // Unattended implements the core functionality of the package. It takes
 // ownership of running and updating a target application
 type Unattended struct {
-	// config of the Unattended update setup
-	config Config
+	clientID            string
+	target              Target
+	updateCheckInterval time.Duration
+
+	// command holds the target application when executed
+	command          *exec.Cmd
+	commandCompleted bool
+	log              *logrus.Entry
+	waitGroup        sync.WaitGroup
 }
 
 // New creates a new instance of the unattended updater
-func New(config Config) (*Unattended, error) {
+func New(
+	clientID string,
+	target Target,
+	updateCheckInterval time.Duration,
+	log *logrus.Entry) (*Unattended, error) {
+
+	if target.VersionsPath == "" || target.ApplicationName == "/" {
+		return nil, fmt.Errorf(
+			"Target version path '%s' is not valid",
+			target.VersionsPath)
+	}
+
+	if updateCheckInterval == time.Duration(0) {
+		return nil, fmt.Errorf(
+			"UpdateCheckInterval value of '%v' is invalid",
+			updateCheckInterval)
+	}
 
 	updater := Unattended{
-		config: config,
+		clientID:            clientID,
+		target:              target,
+		updateCheckInterval: updateCheckInterval,
+		log:                 log,
 	}
 
 	return &updater, nil
@@ -51,64 +83,264 @@ func New(config Config) (*Unattended, error) {
 // If any updates are found for targets in UpdateManifests they will be
 // downloaded, applied and the target application restarted
 func (updater *Unattended) Run() error {
-	fmt.Println("BLAH! RUN!")
+	updater.log.WithField(
+		"check_interval", updater.updateCheckInterval,
+	).Info("Starting service with update checking enabled")
+	time.AfterFunc(updater.updateCheckInterval, updater.handleUpdates)
+	return updater.RunWithoutUpdate()
+}
+
+// RunWithoutUpdate starts the target application without checking for updates
+func (updater *Unattended) RunWithoutUpdate() error {
+	updater.command = exec.Command(
+		filepath.Join(
+			updater.target.VersionsPath,
+			updater.target.LatestVersion(),
+			updater.target.ApplicationName,
+		),
+		updater.target.ApplicationParameters...)
+
+	commandOutPipe, _ := updater.command.StdoutPipe()
+	// TODO: Pass the pipes back to the caller or have the caller end in readers/writers
+	//commandErrPipe, _ := command.StderrPipe()
+
+	err := updater.command.Start()
+	if err != nil {
+		return err
+	}
+
+	// Copy the output from the command to stdout
+	// TODO: This should probably go somewhere else!
+	updater.waitGroup.Add(1)
+	go func() {
+		defer func() {
+			updater.waitGroup.Done()
+		}()
+		io.Copy(os.Stdout, commandOutPipe)
+	}()
+
+	updater.commandCompleted = false
+	err = updater.command.Wait()
+	if err != nil {
+		updater.log.Infof("Target completed: %s", err)
+	}
+	updater.commandCompleted = true
+	updater.waitGroup.Wait()
 	return nil
 }
 
-// ProcessUpdates checks, downloads and applies downloads if they are available
-func (updater *Unattended) ProcessUpdates() error {
+// Stop the target application
+func (updater *Unattended) Stop() error {
+	updater.log.Info("Stopping target")
+	err := updater.command.Process.Signal(os.Interrupt)
+	if err != nil {
+		updater.log.Warning("Unable to send interrupt to target:", err)
+	}
+	for i := 0; i < 5; i++ {
+		if updater.commandCompleted == false {
+			updater.log.Debug("Waiting for target to exit...")
+			time.Sleep(time.Second)
+		} else {
+			updater.log.Info("Target stopped")
+			updater.log.Info("Shutdown")
+			return nil
+		}
+	}
+	updater.log.Warning("Target did not exit in time, killing...")
+	updater.command.Process.Release()
+	updater.command.Process.Kill()
+	return nil
+}
+
+// Restart the target application
+func (updater *Unattended) Restart() error {
+	updater.log.Info("Restarting target")
+	err := updater.Stop()
+	if err != nil {
+		// TODO: ROLLBACK
+		return err
+	}
+	return updater.RunWithoutUpdate()
+}
+
+// handleUpdates runs at updateCheckInterval to check for and apply updates
+func (updater *Unattended) handleUpdates() {
+
+	updater.log.Debug("Checking for updates...")
+	updated, err := updater.ApplyUpdates()
+	if err != nil {
+		updater.log.Warningf("Unable to check for updates: %s", err)
+	}
+	if updated {
+		updater.log.WithField(
+			"new_version", updater.target.LatestVersion(),
+		).Info("Software updated")
+		// Restart the application
+		// TODO: Check if we are leaking a goroutine here
+		go func() {
+			err = updater.Restart()
+			if err != nil {
+				// TODO: ROLLBACK
+				updater.log.Fatalf("Unable to restart target: %s", err)
+			}
+		}()
+	} else {
+		updater.log.Debug("No updates available")
+	}
+	time.AfterFunc(updater.updateCheckInterval, updater.handleUpdates)
+}
+
+// ApplyUpdates downloads and applies downloads if they are available
+func (updater *Unattended) ApplyUpdates() (bool, error) {
+
+	currentVersion := updater.target.LatestVersion()
 
 	omahaManifests, err := updater.getAvailableUpdates()
 	if err != nil {
-		return fmt.Errorf("Unable to get updates for all manifests: %s", err)
+		return false, fmt.Errorf("Unable to get updates: %s", err)
 	}
 	if len(omahaManifests) == 0 {
-		fmt.Println("No updates are available")
-		return nil
+		return false, nil
 	}
 
-	fmt.Printf("%d updates found.. download!\n", len(omahaManifests))
+	updater.log.WithField(
+		"updates", len(omahaManifests),
+	).Debug("Updates found, download...")
 
-	tempPath := filepath.Join(path.Dir(updater.config.Target.Path), "../tmp")
-
-	// Remove/clean the temp directory
+	tempPath := filepath.Join(updater.target.VersionsPath, "tmp")
+	//Remove/clean the temp directory
 	err = os.RemoveAll(tempPath)
 	if err != nil {
-		fmt.Printf("Unable to remove temp download path at '%s': %s\n",
+		updater.log.Warningf(
+			"Unable to remove temp download path at '%s': %s",
 			tempPath,
 			err)
 	}
+
 	// And recreate/create the temp directory
 	err = os.MkdirAll(tempPath, 0755)
 	if err != nil {
-		fmt.Printf("Unable to create temp download path at '%s': %s\n",
+		updater.log.Warningf(
+			"Unable to create temp download path at '%s': %s",
 			tempPath,
 			err)
+		return false, err
 	}
 
-	fmt.Println("Downloading to", tempPath)
+	updater.log.WithField(
+		"path", tempPath,
+	).Debugf("Temp path set")
 
 	for _, omahaManifest := range omahaManifests {
 		downloadPath, err := updater.DownloadAndVerifyPackage(omahaManifest, tempPath)
 		if err != nil {
-			fmt.Printf("Unable to download package for '%s (%s)': %s\n",
-				omahaManifest.Package.Name,
-				omahaManifest.Version,
-				err)
+			updater.log.WithFields(logrus.Fields{
+				"package":         omahaManifest.Package.Name,
+				"package_version": omahaManifest.Version,
+				"reason":          err,
+			}).Errorf("Unable to download package")
+
 			continue
 		}
-		fmt.Printf("Downloaded package for '%s (%s)': %s\n",
-			omahaManifest.Package.Name,
-			omahaManifest.Version,
-			downloadPath)
 
-		// TODO: Ge latest version path
-		// TODO: Clone the path into new version
-		// TODO: Override files from package in new dir
-		// TODO: Restart app
+		updater.log.WithFields(logrus.Fields{
+			"package":         omahaManifest.Package.Name,
+			"package_version": omahaManifest.Version,
+		}).Debug("Downloaded package")
+
+		// Get new version path
+		newVersionPath := filepath.Join(updater.target.VersionsPath, omahaManifest.Version)
+		updater.log.WithField(
+			"path", newVersionPath,
+		).Debugf("New version path set")
+
+		// Clone the current version into new version
+		// Note: From this point on the new version folder might exist, in case of
+		// rollback, remove this version
+		err = copy.Copy(
+			filepath.Join(updater.target.VersionsPath, currentVersion),
+			newVersionPath,
+		)
+		if err != nil {
+			return false, updater.undoIncomplete(newVersionPath, err)
+		}
+		// Override files from package in new dir / apply update
+		// Start with the gz part of the tar.gz file
+		downloadedPackage, err := os.Open(downloadPath)
+		if err != nil {
+			return false, updater.undoIncomplete(newVersionPath, err)
+		}
+		gzReader, err := gzip.NewReader(downloadedPackage)
+		if err != nil {
+			return false, updater.undoIncomplete(newVersionPath, err)
+		}
+
+		tarReader := tar.NewReader(gzReader)
+		// Go through all files in tar archive
+		for {
+			header, err := tarReader.Next()
+
+			// No more
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				// Next!
+				continue
+			}
+
+			// get the filename in the archive
+			filename := header.Name
+			destinationPath := filepath.Join(newVersionPath, filename)
+			switch header.Typeflag {
+			case tar.TypeDir:
+				// Create directories if needed
+				err := os.MkdirAll(destinationPath, header.FileInfo().Mode())
+				if err != nil {
+					return false, updater.undoIncomplete(newVersionPath, err)
+				}
+			case tar.TypeReg:
+				// Create the new file in the destination path
+				destinationFile, err := os.OpenFile(
+					destinationPath,
+					os.O_CREATE|os.O_TRUNC|os.O_WRONLY,
+					header.FileInfo().Mode())
+				if err != nil {
+					return false, updater.undoIncomplete(newVersionPath, err)
+				}
+				defer destinationFile.Close()
+
+				written, err := io.Copy(destinationFile, tarReader)
+				if err != nil {
+					return false, updater.undoIncomplete(newVersionPath, err)
+				}
+				destinationFile.Close()
+
+				if written != header.Size {
+					return false, updater.undoIncomplete(newVersionPath, fmt.Errorf(
+						"Written bytes differ from original file. Expected %d, wrote %d",
+						header.Size,
+						written))
+				}
+				updater.log.WithField(
+					"path", destinationPath,
+				).Debugf("Updated file")
+			default:
+				updater.log.Warningf("Unable to determine type, found: %c %s %s\n",
+					header.Typeflag,
+					"in file",
+					filename,
+				)
+			}
+		}
 	}
 
-	return nil
+	err = os.RemoveAll(tempPath)
+	if err != nil {
+		updater.log.Warningf("Unable to remove temp download path: %s", err)
+	}
+
+	return true, nil
 }
 
 // DownloadAndVerifyPackage downloads and verifies the package from the
@@ -117,7 +349,9 @@ func (updater *Unattended) DownloadAndVerifyPackage(
 	manifest omaha.Manifest,
 	tempPath string) (string, error) {
 
-	fmt.Printf("Downloading package %s\n", manifest.Package.Name)
+	updater.log.WithField(
+		"name", manifest.Package.Name,
+	).Debugf("Downloading package")
 
 	downloadPath := filepath.Join(tempPath, manifest.Package.Name)
 	response, err := grab.Get(downloadPath, manifest.DownloadURL.Codebase)
@@ -130,7 +364,6 @@ func (updater *Unattended) DownloadAndVerifyPackage(
 	if err != nil {
 		return "", fmt.Errorf(
 			"Unable to access: %s",
-			manifest.Package.Name,
 			err)
 	}
 	defer downloadedFile.Close()
@@ -147,19 +380,18 @@ func (updater *Unattended) DownloadAndVerifyPackage(
 	return response.Filename, nil
 }
 
-// IsUpdateAvailable checks if an update is available and returns the available
-// package if true
-func (updater *Unattended) IsUpdateAvailable(
-	manifest UpdateManifest) (bool, omaha.Manifest, error) {
+// isUpdateAvailable checks if an update is available for the target and returns
+// the available package if true
+func (updater *Unattended) isUpdateAvailable() (bool, omaha.Manifest, error) {
 
-	currentVersionDirectory := path.Dir(updater.config.Target.Path)
-	currentVersion := path.Base(currentVersionDirectory)
+	currentVersion := updater.target.LatestVersion()
 
-	fmt.Printf(
-		"Checking updates for %s (%s) at %s\n",
-		manifest.AppID,
-		currentVersion,
-		manifest.Endpoint)
+	updater.log.WithFields(logrus.Fields{
+		"app_id":          updater.target.AppID,
+		"current_version": currentVersion,
+		"update_endpoint": updater.target.UpdateEndpoint,
+	}).Debug("Checking for update")
+
 	// TODO: Convert unattended to proper semver
 	// _, err := semver.Parse("1.0.0-dev")
 	// if err != nil {
@@ -170,9 +402,9 @@ func (updater *Unattended) IsUpdateAvailable(
 	omahaRequest := omaha.Request{
 		Protocol: 3,
 		Application: omaha.App{
-			Channel:  "stable",
+			Channel:  updater.target.UpdateChannel,
 			ClientID: "1",
-			ID:       manifest.AppID,
+			ID:       updater.target.AppID,
 			Version:  currentVersion,
 			Event: omaha.Event{
 				Type:   omaha.EventTypeUpdateCheck,
@@ -189,7 +421,7 @@ func (updater *Unattended) IsUpdateAvailable(
 	}
 
 	response, err := http.Post(
-		manifest.Endpoint,
+		updater.target.UpdateEndpoint,
 		"application/xml",
 		bytes.NewReader(omahaBytes))
 	if err != nil {
@@ -236,21 +468,26 @@ func (updater *Unattended) IsUpdateAvailable(
 
 // getAvailableUpdates checks for all packages that have updates available
 func (updater *Unattended) getAvailableUpdates() ([]omaha.Manifest, error) {
-	fmt.Println("Checking for updates on all manifests")
-
 	var omahaManifests []omaha.Manifest
-	for _, updateManifest := range updater.config.UpdateManifests {
-		hasUpdate, omahaManifest, err := updater.IsUpdateAvailable(updateManifest)
-		if err != nil {
-			return omahaManifests, err
-		}
-		if hasUpdate {
-			fmt.Printf("Update available for %s (%s)\n",
-				updateManifest.AppID,
-				omahaManifest.Version)
-			omahaManifests = append(omahaManifests, omahaManifest)
-		}
+
+	hasUpdate, omahaManifest, err := updater.isUpdateAvailable()
+	if err != nil {
+		return omahaManifests, err
+	}
+	if hasUpdate {
+		updater.log.WithFields(logrus.Fields{
+			"app_id":            updater.target.AppID,
+			"available_version": omahaManifest.Version,
+		}).Debugf("Update available")
+		omahaManifests = append(omahaManifests, omahaManifest)
 	}
 
 	return omahaManifests, nil
+}
+
+// undoIncomplete removes an incomplete update
+func (updater *Unattended) undoIncomplete(versionPath string, originalErr error) error {
+	err := os.RemoveAll(versionPath)
+	updater.log.Errorf("Unable to remove incomplete update: %s", err)
+	return originalErr
 }
