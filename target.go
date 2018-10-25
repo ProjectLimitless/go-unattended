@@ -45,7 +45,7 @@ func (target *Target) LatestVersion() string {
 		return ""
 	}
 
-	latestVersion := ""
+	latestVersion := "0.0.0.0"
 	for _, f := range files {
 		latestVersion = f.Name()
 	}

@@ -132,6 +132,12 @@ func (updater *Unattended) RunWithoutUpdate() error {
 // Stop the target application
 func (updater *Unattended) Stop() error {
 	updater.log.Info("Stopping target")
+	if updater.command == nil {
+		return nil
+	}
+	if updater.command.Process == nil {
+		return nil
+	}
 	err := updater.command.Process.Signal(os.Interrupt)
 	if err != nil {
 		updater.log.Warning("Unable to send interrupt to target:", err)
@@ -255,14 +261,24 @@ func (updater *Unattended) ApplyUpdates() (bool, error) {
 		).Debugf("New version path set")
 
 		// Clone the current version into new version
+		// If no versions are currently installed, create the new path
 		// Note: From this point on the new version folder might exist, in case of
 		// rollback, remove this version
-		err = copy.Copy(
-			filepath.Join(updater.target.VersionsPath, currentVersion),
-			newVersionPath,
-		)
-		if err != nil {
-			return false, updater.undoIncomplete(newVersionPath, err)
+		currentVersionPath := filepath.Join(updater.target.VersionsPath, currentVersion)
+		if _, err = os.Stat(currentVersionPath); err == nil {
+			err = copy.Copy(
+				filepath.Join(updater.target.VersionsPath, currentVersion),
+				newVersionPath,
+			)
+			if err != nil {
+				return false, updater.undoIncomplete(newVersionPath, err)
+			}
+		} else {
+			// No current version exists, create the path
+			err = os.MkdirAll(newVersionPath, 0755)
+			if err != nil {
+				return false, updater.undoIncomplete(newVersionPath, err)
+			}
 		}
 		// Override files from package in new dir / apply update
 		// Start with the gz part of the tar.gz file
@@ -488,6 +504,8 @@ func (updater *Unattended) getAvailableUpdates() ([]omaha.Manifest, error) {
 // undoIncomplete removes an incomplete update
 func (updater *Unattended) undoIncomplete(versionPath string, originalErr error) error {
 	err := os.RemoveAll(versionPath)
-	updater.log.Errorf("Unable to remove incomplete update: %s", err)
+	if err != nil {
+		updater.log.Errorf("Unable to remove incomplete update: %s", err)
+	}
 	return originalErr
 }

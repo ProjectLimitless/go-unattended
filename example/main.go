@@ -29,11 +29,10 @@ func main() {
 		"service": "unattended-test",
 	})
 	log.Info("Setting up Unattended updates")
-
 	updater, err := unattended.New(
 		"GoTEST001", // clientID
 		unattended.Target{ // target
-			VersionsPath:    "./apptoupdate",
+			VersionsPath:    "./noversions",
 			AppID:           "apptoupdate",
 			UpdateEndpoint:  "http://unattended-old.local",
 			UpdateChannel:   "stable",
@@ -45,6 +44,16 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	//
+	// updated, err := updater.ApplyUpdates()
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// if updated {
+	// 	fmt.Println("UPDATED")
+	// } else {
+	// 	fmt.Println("NOTUPDATED")
+	// }
 
 	go func() {
 
