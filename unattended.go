@@ -399,9 +399,7 @@ func (updater *Unattended) DownloadAndVerifyPackage(
 // isUpdateAvailable checks if an update is available for the target and returns
 // the available package if true
 func (updater *Unattended) isUpdateAvailable() (bool, omaha.Manifest, error) {
-
 	currentVersion := updater.target.LatestVersion()
-
 	updater.log.WithFields(logrus.Fields{
 		"app_id":          updater.target.AppID,
 		"current_version": currentVersion,

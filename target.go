@@ -42,7 +42,7 @@ func (target *Target) LatestVersion() string {
 	// the latest version
 	files, err := ioutil.ReadDir(target.VersionsPath)
 	if err != nil {
-		return ""
+		return "0.0.0.0"
 	}
 
 	latestVersion := "0.0.0.0"
