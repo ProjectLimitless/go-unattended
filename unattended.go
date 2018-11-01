@@ -38,6 +38,8 @@ import (
 // Unattended implements the core functionality of the package. It takes
 // ownership of running and updating a target application
 type Unattended struct {
+	OutputStream io.Writer
+
 	// TODO: This mutex should be replaced with a channel
 	mutex               sync.Mutex
 	clientID            string
@@ -71,6 +73,7 @@ func New(
 	}
 
 	updater := Unattended{
+		OutputStream:        os.Stdout,
 		clientID:            clientID,
 		target:              target,
 		updateCheckInterval: updateCheckInterval,
@@ -103,22 +106,21 @@ func (updater *Unattended) RunWithoutUpdate() error {
 		updater.target.ApplicationParameters...)
 
 	commandOutPipe, _ := updater.command.StdoutPipe()
-	// TODO: Pass the pipes back to the caller or have the caller end in readers/writers
-	//commandErrPipe, _ := command.StderrPipe()
+	commandErrPipe, _ := updater.command.StderrPipe()
 
 	err := updater.command.Start()
 	if err != nil {
 		return err
 	}
 
-	// Copy the output from the command to stdout
-	// TODO: This should probably go somewhere else!
+	// Keep copying the output from the process and send to the stream
 	updater.waitGroup.Add(1)
 	go func() {
 		defer func() {
 			updater.waitGroup.Done()
 		}()
-		io.Copy(os.Stdout, commandOutPipe)
+		io.Copy(updater.OutputStream, commandOutPipe)
+		io.Copy(updater.OutputStream, commandErrPipe)
 	}()
 
 	updater.mutex.Lock()
@@ -140,13 +142,18 @@ func (updater *Unattended) RunWithoutUpdate() error {
 // Stop the target application
 func (updater *Unattended) Stop() error {
 	updater.log.Info("Stopping target")
-	if updater.command == nil {
+
+	updater.mutex.Lock()
+	cmd := updater.command
+	updater.mutex.Unlock()
+
+	if cmd == nil {
 		return nil
 	}
-	if updater.command.Process == nil {
+	if cmd.Process == nil {
 		return nil
 	}
-	err := updater.command.Process.Signal(os.Interrupt)
+	err := cmd.Process.Signal(os.Interrupt)
 	if err != nil {
 		updater.log.Warningf("Unable to send interrupt to target: %s", err)
 	}
@@ -165,8 +172,8 @@ func (updater *Unattended) Stop() error {
 		}
 	}
 	updater.log.Warning("Target did not exit in time, killing...")
-	updater.command.Process.Release()
-	updater.command.Process.Kill()
+	cmd.Process.Release()
+	cmd.Process.Kill()
 	return nil
 }
 
