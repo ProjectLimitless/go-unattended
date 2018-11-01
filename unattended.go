@@ -38,6 +38,8 @@ import (
 // Unattended implements the core functionality of the package. It takes
 // ownership of running and updating a target application
 type Unattended struct {
+	// TODO: This mutex should be replaced with a channel
+	mutex               sync.Mutex
 	clientID            string
 	target              Target
 	updateCheckInterval time.Duration
@@ -119,12 +121,18 @@ func (updater *Unattended) RunWithoutUpdate() error {
 		io.Copy(os.Stdout, commandOutPipe)
 	}()
 
+	updater.mutex.Lock()
 	updater.commandCompleted = false
+	updater.mutex.Unlock()
+
 	err = updater.command.Wait()
 	if err != nil {
 		updater.log.Infof("Target completed: %s", err)
 	}
+	updater.mutex.Lock()
 	updater.commandCompleted = true
+	updater.mutex.Unlock()
+
 	updater.waitGroup.Wait()
 	return nil
 }
@@ -140,10 +148,14 @@ func (updater *Unattended) Stop() error {
 	}
 	err := updater.command.Process.Signal(os.Interrupt)
 	if err != nil {
-		updater.log.Warning("Unable to send interrupt to target:", err)
+		updater.log.Warningf("Unable to send interrupt to target: %s", err)
 	}
 	for i := 0; i < 5; i++ {
-		if updater.commandCompleted == false {
+		updater.mutex.Lock()
+		isCommandComplete := updater.commandCompleted
+		updater.mutex.Unlock()
+
+		if isCommandComplete == false {
 			updater.log.Debug("Waiting for target to exit...")
 			time.Sleep(time.Second)
 		} else {
