@@ -38,14 +38,12 @@ import (
 // Unattended implements the core functionality of the package. It takes
 // ownership of running and updating a target application
 type Unattended struct {
-	OutputStream io.Writer
-
 	// TODO: This mutex should be replaced with a channel
 	mutex               sync.Mutex
 	clientID            string
 	target              Target
 	updateCheckInterval time.Duration
-
+	outputWriter        io.Writer
 	// command holds the target application when executed
 	command          *exec.Cmd
 	commandCompleted bool
@@ -73,7 +71,7 @@ func New(
 	}
 
 	updater := Unattended{
-		OutputStream:        os.Stdout,
+		outputWriter:        os.Stdout,
 		clientID:            clientID,
 		target:              target,
 		updateCheckInterval: updateCheckInterval,
@@ -81,6 +79,11 @@ func New(
 	}
 
 	return &updater, nil
+}
+
+// SetOutputWriter sets the writer to write the tatget's output to
+func (updater *Unattended) SetOutputWriter(writer io.Writer) {
+	updater.outputWriter = writer
 }
 
 // Run starts the target application and the update check loop.
@@ -119,8 +122,8 @@ func (updater *Unattended) RunWithoutUpdate() error {
 		defer func() {
 			updater.waitGroup.Done()
 		}()
-		io.Copy(updater.OutputStream, commandOutPipe)
-		io.Copy(updater.OutputStream, commandErrPipe)
+		io.Copy(updater.outputWriter, commandOutPipe)
+		io.Copy(updater.outputWriter, commandErrPipe)
 	}()
 
 	updater.mutex.Lock()
