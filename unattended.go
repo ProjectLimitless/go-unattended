@@ -38,7 +38,6 @@ import (
 // Unattended implements the core functionality of the package. It takes
 // ownership of running and updating a target application
 type Unattended struct {
-	// TODO: This mutex should be replaced with a channel
 	mutex               sync.Mutex
 	clientID            string
 	target              Target
@@ -81,7 +80,7 @@ func New(
 	return &updater, nil
 }
 
-// SetOutputWriter sets the writer to write the tatget's output to
+// SetOutputWriter sets the writer to write the target's output to
 func (updater *Unattended) SetOutputWriter(writer io.Writer) {
 	updater.outputWriter = writer
 }
