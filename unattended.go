@@ -107,10 +107,16 @@ func (updater *Unattended) RunWithoutUpdate() error {
 		),
 		updater.target.ApplicationParameters...)
 
-	commandOutPipe, _ := updater.command.StdoutPipe()
-	commandErrPipe, _ := updater.command.StderrPipe()
+	commandOutPipe, err := updater.command.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("Unable to start reading miner output")
+	}
+	commandErrPipe, err := updater.command.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("Unable to start reading miner error output")
+	}
 
-	err := updater.command.Start()
+	err = updater.command.Start()
 	if err != nil {
 		return err
 	}
