@@ -15,6 +15,7 @@ package unattended
 
 import (
 	"io/ioutil"
+	"strings"
 )
 
 // Target defines the target application to be controlled and updated by
@@ -47,6 +48,14 @@ func (target *Target) LatestVersion() string {
 
 	latestVersion := "0.0.0.0"
 	for _, f := range files {
+		// Skip all dirs not containing a '.'
+		if strings.Contains(f.Name(), ".") == false {
+			continue
+		}
+		// Skip any files
+		if f.IsDir() == false {
+			continue
+		}
 		latestVersion = f.Name()
 	}
 	return latestVersion
