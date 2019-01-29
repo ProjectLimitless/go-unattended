@@ -526,6 +526,11 @@ func (updater *Unattended) getAvailableUpdates() ([]omaha.Manifest, error) {
 	return omahaManifests, nil
 }
 
+// GetLatestVersion returns the latest installed version
+func (updater *Unattended) GetLatestVersion() string {
+	return updater.target.LatestVersion()
+}
+
 // undoIncomplete removes an incomplete update
 func (updater *Unattended) undoIncomplete(versionPath string, originalErr error) error {
 	err := os.RemoveAll(versionPath)
