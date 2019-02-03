@@ -106,7 +106,8 @@ func (updater *Unattended) RunWithoutUpdate() error {
 			updater.target.ApplicationName,
 		),
 		updater.target.ApplicationParameters...)
-
+	// TODO: Do we need to set a process group on Linux?
+	// updater.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	commandOutPipe, err := updater.command.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("Unable to start reading miner output")
@@ -149,11 +150,10 @@ func (updater *Unattended) RunWithoutUpdate() error {
 
 // Stop the target application
 func (updater *Unattended) Stop() error {
-	updater.log.Info("Stopping target")
-
 	updater.mutex.Lock()
 	cmd := updater.command
 	updater.mutex.Unlock()
+	updater.log.Infof("Stopping target, PID %d", cmd.Process.Pid)
 
 	if cmd == nil {
 		return nil
@@ -182,6 +182,16 @@ func (updater *Unattended) Stop() error {
 	updater.log.Warning("Target did not exit in time, killing...")
 	cmd.Process.Release()
 	cmd.Process.Kill()
+	// On Windows the child isn't killed and orphaned
+	// TODO: Find a better solution that going on a killing spree
+	minerProcess, err := os.FindProcess(cmd.Process.Pid)
+	// Process found, no errors
+	if err == nil {
+		err = minerProcess.Kill()
+		if err != nil {
+			updater.log.Warningf("Target could not be killed: %s", err)
+		}
+	}
 	return nil
 }
 
