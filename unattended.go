@@ -26,6 +26,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,9 +153,8 @@ func (updater *Unattended) RunWithoutUpdate() error {
 // Stop the target application
 func (updater *Unattended) Stop() error {
 	updater.mutex.Lock()
+	defer updater.mutex.Unlock()
 	cmd := updater.command
-	updater.mutex.Unlock()
-	updater.log.Infof("Stopping target, PID %d", cmd.Process.Pid)
 
 	if cmd == nil {
 		return nil
@@ -161,37 +162,52 @@ func (updater *Unattended) Stop() error {
 	if cmd.Process == nil {
 		return nil
 	}
-	err := cmd.Process.Signal(os.Interrupt)
-	if err != nil {
-		updater.log.Warningf("Unable to send interrupt to target: %s", err)
-	}
-	for i := 0; i < 5; i++ {
-		updater.mutex.Lock()
-		isCommandComplete := updater.commandCompleted
-		updater.mutex.Unlock()
 
-		if isCommandComplete == false {
-			updater.log.Debug("Waiting for target to exit...")
-			time.Sleep(time.Second)
-		} else {
-			updater.log.Info("Target stopped")
-			updater.log.Info("Shutdown")
+	updater.log.Infof("Stopping target, PID %d", cmd.Process.Pid)
+
+	//
+	// Simplified attempt at killing spree
+	// os.Interrupt signal isn't available on Windows, so we're just
+	// killing the processes
+	//
+	// This doesn't work reliably when unattended is used by a Windows service
+	// that spawns a sub-unattended managed service. It needs some work.
+	//
+	if strings.ToLower(runtime.GOOS) == "linux" || strings.ToLower(runtime.GOOS) == "darwin" {
+		// updater.log.Info("Releasing target process")
+		// err := cmd.Process.Release()
+		// if err != nil {
+		// 	updater.log.Warningf("Target could not be released: %s", err)
+		// 	// Return nil, there isn't much we can do now...
+		// 	return nil
+		// }
+		updater.log.Info("Killing target process")
+		err := cmd.Process.Kill()
+		if err != nil {
+			updater.log.Warningf("Target could not be killed: %s", err)
+			// Return nil, there isn't much we can do now...
+			return nil
+		}
+
+	} else if strings.ToLower(runtime.GOOS) == "windows" {
+		updater.log.Info("Killing target process with taskkill")
+		// Some processes just need to be force killed on Windows, many many
+		// tests showed Windows not killing it when process.Kill is used.
+		// This is especially true when this runs as a service
+		_, err := exec.Command(
+			"taskkill",
+			"/F",   // Force
+			"/PID", // by process ID
+			fmt.Sprintf("%d", cmd.Process.Pid),
+		).Output()
+		if err != nil {
+			updater.log.Warningf("Target could not be taskkilled: %s", err)
+			// Return nil, there isn't much we can do now...
 			return nil
 		}
 	}
-	updater.log.Warning("Target did not exit in time, killing...")
-	cmd.Process.Release()
-	cmd.Process.Kill()
-	// On Windows the child isn't killed and orphaned
-	// TODO: Find a better solution that going on a killing spree
-	minerProcess, err := os.FindProcess(cmd.Process.Pid)
-	// Process found, no errors
-	if err == nil {
-		err = minerProcess.Kill()
-		if err != nil {
-			updater.log.Warningf("Target could not be killed: %s", err)
-		}
-	}
+
+	updater.log.Info("Target stopped")
 	return nil
 }
 
@@ -386,6 +402,16 @@ func (updater *Unattended) ApplyUpdates() (bool, error) {
 				)
 			}
 		}
+		err = gzReader.Close()
+		if err != nil {
+			updater.log.Warningf("Unable to close gz: %s", err)
+		}
+
+		err = downloadedPackage.Close()
+		if err != nil {
+			updater.log.Warningf("Unable to close package: %s", err)
+		}
+
 	}
 
 	err = os.RemoveAll(tempPath)
@@ -513,7 +539,6 @@ func (updater *Unattended) isUpdateAvailable() (bool, omaha.Manifest, error) {
 			"%s",
 			omahaResponse.Application.UpdateCheck.Status)
 	}
-
 	return true, omahaResponse.Application.UpdateCheck.Manifest, nil
 }
 
